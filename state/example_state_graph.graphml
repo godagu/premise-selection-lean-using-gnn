@@ -1,0 +1,278 @@
+<?xml version='1.0' encoding='utf-8'?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd"><key id="d7" for="edge" attr.name="relation" attr.type="string"/>
+<key id="d6" for="node" attr.name="operator" attr.type="string"/>
+<key id="d5" for="node" attr.name="name_index" attr.type="long"/>
+<key id="d4" for="node" attr.name="declaration_index" attr.type="long"/>
+<key id="d3" for="node" attr.name="name" attr.type="string"/>
+<key id="d2" for="node" attr.name="expression_status" attr.type="string"/>
+<key id="d1" for="node" attr.name="text" attr.type="string"/>
+<key id="d0" for="node" attr.name="node_type" attr.type="string"/>
+<graph edgedefault="directed"><node id="state">
+  <data key="d0">STATE</data>
+</node>
+<node id="context">
+  <data key="d0">CONTEXT</data>
+</node>
+<node id="goal">
+  <data key="d0">GOAL</data>
+  <data key="d1">f x y = f x' y'</data>
+  <data key="d2">parsed</data>
+</node>
+<node id="declaration_0_0">
+  <data key="d0">DECL</data>
+  <data key="d3">α</data>
+  <data key="d4">0</data>
+  <data key="d5">0</data>
+</node>
+<node id="declaration_type_0_0">
+  <data key="d0">TYPE_EXPR</data>
+  <data key="d1">Sort u_1</data>
+</node>
+<node id="declaration_1_0">
+  <data key="d0">DECL</data>
+  <data key="d3">β</data>
+  <data key="d4">1</data>
+  <data key="d5">0</data>
+</node>
+<node id="declaration_type_1_0">
+  <data key="d0">TYPE_EXPR</data>
+  <data key="d1">Sort u_2</data>
+</node>
+<node id="declaration_2_0">
+  <data key="d0">DECL</data>
+  <data key="d3">γ</data>
+  <data key="d4">2</data>
+  <data key="d5">0</data>
+</node>
+<node id="declaration_type_2_0">
+  <data key="d0">TYPE_EXPR</data>
+  <data key="d1">Sort u_3</data>
+</node>
+<node id="declaration_3_0">
+  <data key="d0">DECL</data>
+  <data key="d3">f</data>
+  <data key="d4">3</data>
+  <data key="d5">0</data>
+</node>
+<node id="declaration_type_3_0">
+  <data key="d0">TYPE_EXPR</data>
+  <data key="d1">α → β → γ</data>
+</node>
+<node id="declaration_4_0">
+  <data key="d0">DECL</data>
+  <data key="d3">x</data>
+  <data key="d4">4</data>
+  <data key="d5">0</data>
+</node>
+<node id="declaration_type_4_0">
+  <data key="d0">TYPE_EXPR</data>
+  <data key="d1">α</data>
+</node>
+<node id="declaration_4_1">
+  <data key="d0">DECL</data>
+  <data key="d3">x'</data>
+  <data key="d4">4</data>
+  <data key="d5">1</data>
+</node>
+<node id="declaration_type_4_1">
+  <data key="d0">TYPE_EXPR</data>
+  <data key="d1">α</data>
+</node>
+<node id="declaration_5_0">
+  <data key="d0">DECL</data>
+  <data key="d3">y</data>
+  <data key="d4">5</data>
+  <data key="d5">0</data>
+</node>
+<node id="declaration_type_5_0">
+  <data key="d0">TYPE_EXPR</data>
+  <data key="d1">β</data>
+</node>
+<node id="declaration_5_1">
+  <data key="d0">DECL</data>
+  <data key="d3">y'</data>
+  <data key="d4">5</data>
+  <data key="d5">1</data>
+</node>
+<node id="declaration_type_5_1">
+  <data key="d0">TYPE_EXPR</data>
+  <data key="d1">β</data>
+</node>
+<node id="declaration_6_0">
+  <data key="d0">DECL</data>
+  <data key="d3">hx</data>
+  <data key="d4">6</data>
+  <data key="d5">0</data>
+</node>
+<node id="declaration_type_6_0">
+  <data key="d0">TYPE_EXPR</data>
+  <data key="d1">x = x'</data>
+</node>
+<node id="declaration_7_0">
+  <data key="d0">DECL</data>
+  <data key="d3">hy</data>
+  <data key="d4">7</data>
+  <data key="d5">0</data>
+</node>
+<node id="declaration_type_7_0">
+  <data key="d0">TYPE_EXPR</data>
+  <data key="d1">y = y'</data>
+</node>
+<node id="goal_expr_0">
+  <data key="d0">OP_REL</data>
+  <data key="d6">=</data>
+</node>
+<node id="goal_expr_0_0">
+  <data key="d0">APP</data>
+</node>
+<node id="goal_expr_0_0_0">
+  <data key="d0">APP</data>
+</node>
+<node id="goal_expr_0_0_0_0">
+  <data key="d0">VAR</data>
+  <data key="d3">f</data>
+</node>
+<node id="goal_expr_0_0_0_1">
+  <data key="d0">VAR</data>
+  <data key="d3">x</data>
+</node>
+<node id="goal_expr_0_0_1">
+  <data key="d0">VAR</data>
+  <data key="d3">y</data>
+</node>
+<node id="goal_expr_0_1">
+  <data key="d0">APP</data>
+</node>
+<node id="goal_expr_0_1_0">
+  <data key="d0">APP</data>
+</node>
+<node id="goal_expr_0_1_0_0">
+  <data key="d0">VAR</data>
+  <data key="d3">f</data>
+</node>
+<node id="goal_expr_0_1_0_1">
+  <data key="d0">VAR</data>
+  <data key="d3">x'</data>
+</node>
+<node id="goal_expr_0_1_1">
+  <data key="d0">VAR</data>
+  <data key="d3">y'</data>
+</node>
+<edge source="state" target="context" id="0">
+  <data key="d7">has_ctx</data>
+</edge>
+<edge source="state" target="goal" id="0">
+  <data key="d7">has_goal</data>
+</edge>
+<edge source="context" target="declaration_0_0" id="0">
+  <data key="d7">decl</data>
+</edge>
+<edge source="context" target="declaration_1_0" id="0">
+  <data key="d7">decl</data>
+</edge>
+<edge source="context" target="declaration_2_0" id="0">
+  <data key="d7">decl</data>
+</edge>
+<edge source="context" target="declaration_3_0" id="0">
+  <data key="d7">decl</data>
+</edge>
+<edge source="context" target="declaration_4_0" id="0">
+  <data key="d7">decl</data>
+</edge>
+<edge source="context" target="declaration_4_1" id="0">
+  <data key="d7">decl</data>
+</edge>
+<edge source="context" target="declaration_5_0" id="0">
+  <data key="d7">decl</data>
+</edge>
+<edge source="context" target="declaration_5_1" id="0">
+  <data key="d7">decl</data>
+</edge>
+<edge source="context" target="declaration_6_0" id="0">
+  <data key="d7">decl</data>
+</edge>
+<edge source="context" target="declaration_7_0" id="0">
+  <data key="d7">decl</data>
+</edge>
+<edge source="goal" target="goal_expr_0" id="0">
+  <data key="d7">has_expr</data>
+</edge>
+<edge source="declaration_0_0" target="declaration_type_0_0" id="0">
+  <data key="d7">has_type</data>
+</edge>
+<edge source="declaration_1_0" target="declaration_type_1_0" id="0">
+  <data key="d7">has_type</data>
+</edge>
+<edge source="declaration_2_0" target="declaration_type_2_0" id="0">
+  <data key="d7">has_type</data>
+</edge>
+<edge source="declaration_3_0" target="declaration_type_3_0" id="0">
+  <data key="d7">has_type</data>
+</edge>
+<edge source="declaration_4_0" target="declaration_type_4_0" id="0">
+  <data key="d7">has_type</data>
+</edge>
+<edge source="declaration_4_1" target="declaration_type_4_1" id="0">
+  <data key="d7">has_type</data>
+</edge>
+<edge source="declaration_5_0" target="declaration_type_5_0" id="0">
+  <data key="d7">has_type</data>
+</edge>
+<edge source="declaration_5_1" target="declaration_type_5_1" id="0">
+  <data key="d7">has_type</data>
+</edge>
+<edge source="declaration_6_0" target="declaration_type_6_0" id="0">
+  <data key="d7">has_type</data>
+</edge>
+<edge source="declaration_7_0" target="declaration_type_7_0" id="0">
+  <data key="d7">has_type</data>
+</edge>
+<edge source="goal_expr_0" target="goal_expr_0_0" id="0">
+  <data key="d7">lhs</data>
+</edge>
+<edge source="goal_expr_0" target="goal_expr_0_1" id="0">
+  <data key="d7">rhs</data>
+</edge>
+<edge source="goal_expr_0_0" target="goal_expr_0_0_0" id="0">
+  <data key="d7">app_fn</data>
+</edge>
+<edge source="goal_expr_0_0" target="goal_expr_0_0_1" id="0">
+  <data key="d7">app_arg</data>
+</edge>
+<edge source="goal_expr_0_0_0" target="goal_expr_0_0_0_0" id="0">
+  <data key="d7">app_fn</data>
+</edge>
+<edge source="goal_expr_0_0_0" target="goal_expr_0_0_0_1" id="0">
+  <data key="d7">app_arg</data>
+</edge>
+<edge source="goal_expr_0_0_0_0" target="declaration_3_0" id="0">
+  <data key="d7">ref_decl</data>
+</edge>
+<edge source="goal_expr_0_0_0_1" target="declaration_4_0" id="0">
+  <data key="d7">ref_decl</data>
+</edge>
+<edge source="goal_expr_0_0_1" target="declaration_5_0" id="0">
+  <data key="d7">ref_decl</data>
+</edge>
+<edge source="goal_expr_0_1" target="goal_expr_0_1_0" id="0">
+  <data key="d7">app_fn</data>
+</edge>
+<edge source="goal_expr_0_1" target="goal_expr_0_1_1" id="0">
+  <data key="d7">app_arg</data>
+</edge>
+<edge source="goal_expr_0_1_0" target="goal_expr_0_1_0_0" id="0">
+  <data key="d7">app_fn</data>
+</edge>
+<edge source="goal_expr_0_1_0" target="goal_expr_0_1_0_1" id="0">
+  <data key="d7">app_arg</data>
+</edge>
+<edge source="goal_expr_0_1_0_0" target="declaration_3_0" id="0">
+  <data key="d7">ref_decl</data>
+</edge>
+<edge source="goal_expr_0_1_0_1" target="declaration_4_1" id="0">
+  <data key="d7">ref_decl</data>
+</edge>
+<edge source="goal_expr_0_1_1" target="declaration_5_1" id="0">
+  <data key="d7">ref_decl</data>
+</edge>
+</graph></graphml>

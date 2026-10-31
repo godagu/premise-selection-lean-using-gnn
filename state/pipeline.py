@@ -1,7 +1,7 @@
-from schema import RawParsedState, ParsedState, ContextDeclaration
-from splitter import split_state
-from context_parser import parse_context_line
-from normalizer import normalize_text
+from state.schema import RawParsedState, ParsedState, ContextDeclaration
+from state.splitter import split_state
+from state.context_parser import parse_context_line
+from state.normalizer import normalize_text
 
 def process_state(state_raw: str) -> ParsedState:
     """
@@ -22,5 +22,5 @@ def process_state(state_raw: str) -> ParsedState:
             decl = parse_context_line(normalized_line)
             declarations.append(decl)
 
-    normalized_goal = normalize_text(raw_parsed.raw_goal)
+    normalized_goal = normalize_text(raw_parsed.raw_goal, preserve_newlines=True)
     return ParsedState(declarations=declarations, goal=normalized_goal)

@@ -1,0 +1,9 @@
+α : Type u_1
+inst✝⁴ : LT α
+inst✝³ : DecidableRel LT.lt
+inst✝² : DecidableEq α
+inst✝¹ : BEq α
+inst✝ : LawfulBEq α
+lt_irrefl : ∀ (x : α), ¬x < x
+x y : α
+⊢ (if x < y then Ordering.lt else if x = y then Ordering.eq else Ordering.gt) = Ordering.eq ↔ x = y

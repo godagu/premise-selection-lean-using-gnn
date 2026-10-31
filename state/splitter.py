@@ -1,4 +1,4 @@
-from schema import RawParsedState
+from state.schema import RawParsedState
 
 def split_state(state_raw: str) -> RawParsedState:
     """

@@ -1,5 +1,5 @@
 from typing import List
-from schema import ContextDeclaration, ParsedState, RawParsedState
+from state.schema import ContextDeclaration, ParsedState, RawParsedState
 
 # name : type
 # name1 name2 ... : type
