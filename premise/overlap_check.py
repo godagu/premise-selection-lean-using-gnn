@@ -14,7 +14,7 @@ Symbols are read from the actual graphs (state graph and premise graph, same fun
 so this measures what the GNN will see. `--symbols regex` falls back to the cheap text extraction.
 
 Usage (from the project root, next to train.json):
-    python -m premise.overlap_check --dataset train.json --corpus corpus.jsonl --max-pairs 2000
+    python -m premise.overlap_check --dataset train.json train2.json --corpus corpus.jsonl --max-pairs 2000
 """
 import argparse
 import json
@@ -256,28 +256,11 @@ def jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b) if a | b else 0.0
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dataset", type=Path, default=Path("train.json"))
-    ap.add_argument("--corpus", type=Path, default=Path("corpus.json"))
-    ap.add_argument("--max-pairs", type=int, default=2000)
-    ap.add_argument("--negatives", type=int, default=5, help="random accessible premises per pair")
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--symbols", choices=["graph", "regex"], default="graph",
-                    help="graph: symbols from the real premise graphs (slower: builds every premise graph once)")
-    ap.add_argument("--out", type=Path, help="optional JSONL with per-pair metrics")
-    args = ap.parse_args()
-
-    rng = random.Random(args.seed)
-    print("Loading corpus ...")
-    index = PremiseIndex(load_corpus(args.corpus), args.symbols)
-    empty = sum(1 for syms in index.symbols if not syms)
-    print(f"  {index.n} premises in {len(index.file_slice)} files; {empty} with an empty symbol set ({empty / max(index.n, 1):.1%})")
-
-    print("Loading dataset ...")
-    pairs = list(iter_pairs(json.loads(args.dataset.read_text(encoding="utf-8"))))
+def evaluate_dataset(index: PremiseIndex, dataset_path: Path, args: argparse.Namespace, rng: random.Random) -> None:
+    print(f"\n{'=' * 78}\nDATASET: {dataset_path}\n{'=' * 78}")
+    pairs = list(iter_pairs(json.loads(dataset_path.read_text(encoding="utf-8"))))
     rng.shuffle(pairs)
-    print(f"  {len(pairs)} (state, used premise) pairs; sampling up to {args.max_pairs}")
+    print(f"{len(pairs)} (state, used premise) pairs; sampling up to {args.max_pairs}")
 
     skipped = Counter()
     rows: list[dict[str, Any]] = []
@@ -327,7 +310,8 @@ def main() -> None:
         })
 
     if not rows:
-        sys.exit("No usable pairs. Skipped: " + str(dict(skipped)))
+        print("No usable pairs. Skipped: " + str(dict(skipped)))
+        return
 
     def mean(key: str, subset=rows) -> float:
         return float(np.mean([r[key] for r in subset]))
@@ -352,11 +336,33 @@ def main() -> None:
     print(f"median symbols  state: {np.median([r['state_syms'] for r in rows]):.0f}  premise: {np.median([r['premise_syms'] for r in rows]):.0f}")
 
     if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        with args.out.open("w", encoding="utf-8") as f:
+        out = args.out if len(args.dataset) == 1 else args.out.with_name(f"{args.out.stem}_{dataset_path.stem}{args.out.suffix}")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("w", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        print(f"per-pair metrics written to {args.out}")
+        print(f"per-pair metrics written to {out}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dataset", type=Path, nargs="+", default=[Path("train.json")],
+                    help="one or more train/val/test json files; each one gets its own report")
+    ap.add_argument("--corpus", type=Path, default=Path("corpus.jsonl"))
+    ap.add_argument("--max-pairs", type=int, default=2000)
+    ap.add_argument("--negatives", type=int, default=5, help="random accessible premises per pair")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--symbols", choices=["graph", "regex"], default="graph",
+                    help="graph: symbols from the real premise graphs (slower: builds every premise graph once)")
+    ap.add_argument("--out", type=Path, help="optional JSONL with per-pair metrics (suffixed with the dataset name if several)")
+    args = ap.parse_args()
+
+    print("Loading corpus ...")
+    index = PremiseIndex(load_corpus(args.corpus), args.symbols)
+    empty = sum(1 for syms in index.symbols if not syms)
+    print(f"  {index.n} premises in {len(index.file_slice)} files; {empty} with an empty symbol set ({empty / max(index.n, 1):.1%})")
+    for dataset_path in args.dataset:
+        evaluate_dataset(index, dataset_path, args, random.Random(args.seed))
 
 
 if __name__ == "__main__":
