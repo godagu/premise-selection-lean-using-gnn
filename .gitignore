@@ -6,3 +6,5 @@ __pycache__/
 /corpus.jsonl
 /*.json
 /venv/
+cache/
+runs/

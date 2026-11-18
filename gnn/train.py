@@ -1,0 +1,243 @@
+"""
+Train the twin-tower model from a cache built by gnn.build_cache.
+
+Example:
+    python -m gnn.train --cache cache/novel_premises_moderate \
+        --epochs 20 --batch-size 32 --patience 5 \
+        --output runs/novel_premises_moderate.pt
+
+The reported top-1 accuracy is retrieval among the premises in each batch, not
+over the entire corpus. Validation batches are a fixed shuffle (the same every epoch),
+so they mix states from different theorems like the training batches do.
+
+With --benchmark and --split, every epoch also ranks ALL accessible premises for a
+fixed random subset of validation states (--retrieval-states, same protocol as
+gnn.evaluate) and logs R@1/10/100 and MRR. That is the number to select checkpoints
+by: on the 3,000-theorem run, the best-val-loss checkpoint had R@100 3.6% while a
+later checkpoint with worse val loss had 10.9%.
+
+Checkpoints: <output> (best val loss), <output>_best_top1, and with retrieval
+<output>_best_mrr. Early stopping defaults to val_mrr when retrieval is on.
+"""
+import argparse
+import random
+import sys
+from pathlib import Path
+
+import numpy as np
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from gnn.dataset import batch_indices, load_part, load_vocab, make_batch
+from gnn.encoder import EncoderConfig
+from gnn.twin_tower import TwinTower, info_nce
+
+
+def run_epoch(model, pairs, batch_size, device, seed, epoch, optimizer=None):
+    import torch
+
+    training = optimizer is not None
+    model.train(training)
+    if training:
+        indices = list(batch_indices(len(pairs), batch_size, seed, epoch))
+    else:
+        order = np.random.default_rng(0).permutation(len(pairs))   # fixed shuffle: identical batches every epoch
+        indices = [order[start:start + batch_size] for start in range(0, len(order), batch_size)]
+
+    loss_sum = accuracy_sum = examples = 0
+    for idx in indices:
+        if len(idx) < 2:
+            continue
+        states, premises, state_ids, premise_ids = make_batch(pairs, idx)
+        states, premises = states.to(device), premises.to(device)
+        state_ids, premise_ids = state_ids.to(device), premise_ids.to(device)
+
+        if training:
+            optimizer.zero_grad(set_to_none=True)
+            loss, accuracy = info_nce(model(states, premises), state_ids, premise_ids)
+            loss.backward()
+            optimizer.step()
+        else:
+            with torch.no_grad():
+                loss, accuracy = info_nce(model(states, premises), state_ids, premise_ids)
+
+        if not torch.isfinite(loss):
+            raise RuntimeError(f"non-finite {'training' if training else 'validation'} loss")
+        count = len(idx)
+        loss_sum += loss.item() * count
+        accuracy_sum += accuracy.item() * count
+        examples += count
+
+    if examples == 0:
+        raise ValueError("no complete batches with at least two examples; increase the dataset or reduce batch size")
+    return loss_sum / examples, accuracy_sum / examples, examples
+
+
+def main() -> None:
+    import torch
+
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--cache", type=Path, required=True)
+    parser.add_argument("--train-part", default="train")
+    parser.add_argument("--val-part", default="val")
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--patience", type=int, default=5, help="stop after this many unimproved epochs; 0 disables")
+    parser.add_argument(
+        "--early-stopping-metric", choices=("val_loss", "val_top1", "val_mrr", "val_r10"), default=None,
+        help="metric used for early stopping (default: val_mrr with retrieval, else val_loss)",
+    )
+    parser.add_argument("--benchmark", type=Path, help="folder with corpus.jsonl; turns on per-epoch retrieval eval")
+    parser.add_argument("--split", choices=["novel_premises", "random"])
+    parser.add_argument("--retrieval-states", type=int, default=1000, help="fixed val subset ranked every epoch")
+    parser.add_argument("--dim", type=int, default=64)
+    parser.add_argument("--layers", type=int, default=3)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or another torch device")
+    parser.add_argument("--output", type=Path, default=Path("runs/twin_tower.pt"))
+    args = parser.parse_args()
+
+    retrieval = args.benchmark is not None
+    if retrieval and args.split is None:
+        parser.error("--benchmark needs --split")
+    if args.early_stopping_metric is None:
+        args.early_stopping_metric = "val_mrr" if retrieval else "val_loss"
+    if args.early_stopping_metric in ("val_mrr", "val_r10") and not retrieval:
+        parser.error(f"--early-stopping-metric {args.early_stopping_metric} needs --benchmark and --split")
+    if args.epochs < 1 or args.batch_size < 2 or args.patience < 0:
+        parser.error("--epochs must be positive, --batch-size at least 2, and --patience nonnegative")
+    if (args.learning_rate <= 0 or args.weight_decay < 0 or args.dim < 1 or args.layers < 1
+            or not 0 <= args.dropout <= 1):
+        parser.error("learning rate and model dimensions must be positive; weight decay nonnegative and dropout in [0, 1]")
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
+    device = torch.device(
+        "cuda" if args.device == "auto" and torch.cuda.is_available()
+        else "cpu" if args.device == "auto"
+        else args.device
+    )
+    vocab = load_vocab(args.cache)
+    train_pairs = load_part(args.cache, args.train_part)
+    val_pairs = load_part(args.cache, args.val_part, premises=train_pairs.premises)
+    if len(train_pairs) == 0 or len(val_pairs) == 0:
+        raise ValueError("training and validation parts must both contain at least one pair")
+
+    config = EncoderConfig(
+        vocab_size=len(vocab), dim=args.dim, layers=args.layers, out_dim=args.dim, dropout=args.dropout
+    )
+    model = TwinTower(config).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+
+    task = None
+    if retrieval:
+        from gnn.evaluate import RetrievalTask
+        task = RetrievalTask(args.cache, args.benchmark, args.split, args.val_part, args.train_part,
+                             args.retrieval_states, seed=0, premises=train_pairs.premises)
+
+    print(f"device: {device}; vocabulary: {len(vocab)}")
+    if task is not None:
+        print(f"retrieval eval: {len(task.ranked_states)} fixed {args.val_part} states, all accessible premises")
+    print(f"train: {len(train_pairs)} pairs, {len(train_pairs.states)} states; "
+          f"validation: {len(val_pairs)} pairs, {len(val_pairs.states)} states")
+
+    best_val_loss = float("inf")
+    best_loss_epoch = 0
+    best_val_top1 = float("-inf")
+    best_top1_loss = float("inf")
+    best_top1_epoch = 0
+    best_top1_path = args.output.with_name(f"{args.output.stem}_best_top1{args.output.suffix}")
+    best_mrr, best_mrr_epoch = float("-inf"), 0
+    best_mrr_path = args.output.with_name(f"{args.output.stem}_best_mrr{args.output.suffix}")
+    best_stopping_metric = float("inf") if args.early_stopping_metric == "val_loss" else float("-inf")
+    stale_epochs = 0
+    for epoch in range(args.epochs):
+        train_loss, train_accuracy, train_count = run_epoch(
+            model, train_pairs, args.batch_size, device, args.seed, epoch, optimizer
+        )
+        val_loss, val_accuracy, val_count = run_epoch(
+            model, val_pairs, args.batch_size, device, args.seed, epoch
+        )
+        print(
+            f"epoch {epoch + 1:02d}/{args.epochs}: "
+            f"train loss {train_loss:.4f}, top-1 {train_accuracy:.3f} ({train_count} pairs); "
+            f"val loss {val_loss:.4f}, top-1 {val_accuracy:.3f} ({val_count} pairs); "
+            f"temperature {1 / model.logit_scale.exp().clamp(max=100.0).item():.4f}"
+        )
+        retrieval_metrics = {}
+        if task is not None:
+            from gnn.evaluate import metrics, model_score_fn
+            ranks, _, is_seen = task.rank(model_score_fn(model, task, device, verbose=False), verbose=False)
+            retrieval_metrics = metrics(ranks)
+            novel = metrics(ranks[~is_seen])
+            print(f"          retrieval ({len(ranks)} pairs): R@1 {retrieval_metrics['r1']:.3f}  "
+                  f"R@10 {retrieval_metrics['r10']:.3f}  R@100 {retrieval_metrics['r100']:.3f}  "
+                  f"MRR {retrieval_metrics['mrr']:.4f}  median rank {retrieval_metrics['median_rank']:.0f}  "
+                  f"| novel premises R@10 {novel.get('r10', float('nan')):.3f}  MRR {novel.get('mrr', float('nan')):.4f}",
+                  flush=True)
+
+        checkpoint = {
+            "model_state_dict": model.state_dict(),
+            "config": vars(config),
+            "epoch": epoch + 1,
+            "val_loss": val_loss,
+            "val_top1": val_accuracy,
+            "seed": args.seed,
+            "cache": str(args.cache),
+            "retrieval": retrieval_metrics,
+        }
+        loss_improved = val_loss < best_val_loss
+        top1_improved = val_accuracy > best_val_top1 or (
+            val_accuracy == best_val_top1 and val_loss < best_top1_loss
+        )
+        if loss_improved:
+            best_val_loss = val_loss
+            best_loss_epoch = epoch + 1
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(checkpoint, args.output)
+
+        if top1_improved:
+            best_val_top1 = val_accuracy
+            best_top1_loss = val_loss
+            best_top1_epoch = epoch + 1
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(checkpoint, best_top1_path)
+
+        if retrieval_metrics and retrieval_metrics["mrr"] > best_mrr:
+            best_mrr, best_mrr_epoch = retrieval_metrics["mrr"], epoch + 1
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(checkpoint, best_mrr_path)
+
+        stopping_value = {"val_loss": val_loss, "val_top1": val_accuracy,
+                          "val_mrr": retrieval_metrics.get("mrr"), "val_r10": retrieval_metrics.get("r10")}[args.early_stopping_metric]
+        stopping_improved = (
+            stopping_value < best_stopping_metric if args.early_stopping_metric == "val_loss"
+            else stopping_value > best_stopping_metric
+        )
+        if stopping_improved:
+            best_stopping_metric = stopping_value
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+        if args.patience and stale_epochs >= args.patience:
+            print(f"early stopping after {stale_epochs} epochs without {args.early_stopping_metric} improvement")
+            break
+
+    print(f"best validation-loss checkpoint: {args.output} "
+          f"(epoch {best_loss_epoch}, loss {best_val_loss:.4f})")
+    print(f"best validation-top-1 checkpoint: {best_top1_path} "
+          f"(epoch {best_top1_epoch}, top-1 {best_val_top1:.3f}, loss {best_top1_loss:.4f})")
+    if retrieval:
+        print(f"best retrieval-MRR checkpoint: {best_mrr_path} (epoch {best_mrr_epoch}, MRR {best_mrr:.4f})")
+
+
+if __name__ == "__main__":
+    main()
