@@ -63,14 +63,19 @@ def ignore_mask(state_ids: torch.Tensor, premise_ids: torch.Tensor) -> torch.Ten
     return ignore
 
 
-def info_nce(scores: torch.Tensor, state_ids: torch.Tensor, premise_ids: torch.Tensor):
+def info_nce(scores: torch.Tensor, state_ids: torch.Tensor, premise_ids: torch.Tensor,
+             ignore: torch.Tensor | None = None):
     """
     Contrastive loss. For every state (row), a softmax over all premises (columns) says how likely each premise
     is "the right one"; the loss is -log(probability of the true premise), averaged over states.
     Returns (loss, accuracy) where accuracy = how often the true premise has the highest score in its row.
+    `ignore` [B, P]: entries to remove (secretly correct premises); default ignore_mask(state_ids, premise_ids),
+    which only knows the pairs inside the batch. gnn.dataset.make_training_batch builds a complete one.
     """
     B = scores.size(0)
-    scores = scores.masked_fill(ignore_mask(state_ids, premise_ids), float("-inf"))   # exp(-inf) = 0: removed
+    if ignore is None:
+        ignore = ignore_mask(state_ids, premise_ids)
+    scores = scores.masked_fill(ignore, float("-inf"))   # exp(-inf) = 0: removed
     target = torch.arange(B, device=scores.device)                     # the true premise of row i is column i
     loss = F.cross_entropy(scores, target)
     accuracy = (scores.argmax(dim=1) == target).float().mean()

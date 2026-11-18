@@ -29,12 +29,12 @@ import numpy as np
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gnn.dataset import batch_indices, load_part, load_vocab, make_batch
+from gnn.dataset import NegativeSampler, batch_indices, load_part, load_vocab, make_training_batch
 from gnn.encoder import EncoderConfig
 from gnn.twin_tower import TwinTower, info_nce
 
 
-def run_epoch(model, pairs, batch_size, device, seed, epoch, optimizer=None):
+def run_epoch(model, pairs, batch_size, device, seed, epoch, optimizer=None, sampler=None):
     import torch
 
     training = optimizer is not None
@@ -45,22 +45,25 @@ def run_epoch(model, pairs, batch_size, device, seed, epoch, optimizer=None):
         order = np.random.default_rng(0).permutation(len(pairs))   # fixed shuffle: identical batches every epoch
         indices = [order[start:start + batch_size] for start in range(0, len(order), batch_size)]
 
+    # extra negatives only while training; validation stays in-batch so its numbers are comparable across runs
+    sampler = sampler if training else None
+    rng = np.random.default_rng([seed, epoch, 1])
     loss_sum = accuracy_sum = examples = 0
     for idx in indices:
         if len(idx) < 2:
             continue
-        states, premises, state_ids, premise_ids = make_batch(pairs, idx)
+        states, premises, state_ids, premise_ids, ignore = make_training_batch(pairs, idx, sampler, rng)
         states, premises = states.to(device), premises.to(device)
-        state_ids, premise_ids = state_ids.to(device), premise_ids.to(device)
+        state_ids, premise_ids, ignore = state_ids.to(device), premise_ids.to(device), ignore.to(device)
 
         if training:
             optimizer.zero_grad(set_to_none=True)
-            loss, accuracy = info_nce(model(states, premises), state_ids, premise_ids)
+            loss, accuracy = info_nce(model(states, premises), state_ids, premise_ids, ignore)
             loss.backward()
             optimizer.step()
         else:
             with torch.no_grad():
-                loss, accuracy = info_nce(model(states, premises), state_ids, premise_ids)
+                loss, accuracy = info_nce(model(states, premises), state_ids, premise_ids, ignore)
 
         if not torch.isfinite(loss):
             raise RuntimeError(f"non-finite {'training' if training else 'validation'} loss")
@@ -76,6 +79,8 @@ def run_epoch(model, pairs, batch_size, device, seed, epoch, optimizer=None):
 
 def main() -> None:
     import torch
+
+    sys.stdout.reconfigure(line_buffering=True)   # every line reaches the log at once, also under nohup > file
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cache", type=Path, required=True)
@@ -93,6 +98,10 @@ def main() -> None:
     parser.add_argument("--benchmark", type=Path, help="folder with corpus.jsonl; turns on per-epoch retrieval eval")
     parser.add_argument("--split", choices=["novel_premises", "random"])
     parser.add_argument("--retrieval-states", type=int, default=1000, help="fixed val subset ranked every epoch")
+    parser.add_argument("--in-file-negatives", type=int, default=0,
+                        help="per pair: extra negatives from the positive premise's file (ReProver uses 1)")
+    parser.add_argument("--random-negatives", type=int, default=0,
+                        help="per pair: extra random negatives from the whole corpus (ReProver uses 2)")
     parser.add_argument("--dim", type=int, default=64)
     parser.add_argument("--layers", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.1)
@@ -108,6 +117,8 @@ def main() -> None:
         args.early_stopping_metric = "val_mrr" if retrieval else "val_loss"
     if args.early_stopping_metric in ("val_mrr", "val_r10") and not retrieval:
         parser.error(f"--early-stopping-metric {args.early_stopping_metric} needs --benchmark and --split")
+    if args.in_file_negatives < 0 or args.random_negatives < 0:
+        parser.error("negative counts must be nonnegative")
     if args.epochs < 1 or args.batch_size < 2 or args.patience < 0:
         parser.error("--epochs must be positive, --batch-size at least 2, and --patience nonnegative")
     if (args.learning_rate <= 0 or args.weight_decay < 0 or args.dim < 1 or args.layers < 1
@@ -137,6 +148,12 @@ def main() -> None:
     model = TwinTower(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
+    sampler = None
+    if args.in_file_negatives or args.random_negatives:
+        import json
+        paths = json.loads((args.cache / "premises_meta.json").read_text(encoding="utf-8"))["paths"]
+        sampler = NegativeSampler(paths, args.in_file_negatives, args.random_negatives)
+
     task = None
     if retrieval:
         from gnn.evaluate import RetrievalTask
@@ -146,6 +163,8 @@ def main() -> None:
     print(f"device: {device}; vocabulary: {len(vocab)}")
     if task is not None:
         print(f"retrieval eval: {len(task.ranked_states)} fixed {args.val_part} states, all accessible premises")
+    print(f"extra negatives per pair: {args.in_file_negatives} same-file + {args.random_negatives} random "
+          f"(premise columns per batch: {args.batch_size * (1 + args.in_file_negatives + args.random_negatives)})")
     print(f"train: {len(train_pairs)} pairs, {len(train_pairs.states)} states; "
           f"validation: {len(val_pairs)} pairs, {len(val_pairs.states)} states")
 
@@ -161,7 +180,7 @@ def main() -> None:
     stale_epochs = 0
     for epoch in range(args.epochs):
         train_loss, train_accuracy, train_count = run_epoch(
-            model, train_pairs, args.batch_size, device, args.seed, epoch, optimizer
+            model, train_pairs, args.batch_size, device, args.seed, epoch, optimizer, sampler
         )
         val_loss, val_accuracy, val_count = run_epoch(
             model, val_pairs, args.batch_size, device, args.seed, epoch
@@ -192,6 +211,7 @@ def main() -> None:
             "val_top1": val_accuracy,
             "seed": args.seed,
             "cache": str(args.cache),
+            "negatives": {"in_file": args.in_file_negatives, "random": args.random_negatives},
             "retrieval": retrieval_metrics,
         }
         loss_improved = val_loss < best_val_loss

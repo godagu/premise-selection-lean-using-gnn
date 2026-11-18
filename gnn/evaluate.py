@@ -293,7 +293,7 @@ def main() -> None:
         from gnn.twin_tower import TwinTower
         device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available()
                               else "cpu" if args.device == "auto" else args.device)
-        checkpoint = torch.load(args.checkpoint, map_location=device)
+        checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=True)
         config = EncoderConfig(**checkpoint["config"])
         model = TwinTower(config).to(device)
         model.load_state_dict(checkpoint["model_state_dict"])
