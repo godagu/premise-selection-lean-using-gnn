@@ -101,7 +101,9 @@ def main() -> None:
     parser.add_argument("--in-file-negatives", type=int, default=0,
                         help="per pair: extra negatives from the positive premise's file (ReProver uses 1)")
     parser.add_argument("--random-negatives", type=int, default=0,
-                        help="per pair: extra random negatives from the whole corpus (ReProver uses 2)")
+                        help="per pair: extra random negatives (ReProver uses 2)")
+    parser.add_argument("--seen-negatives", type=int, default=0,
+                        help="per pair: extra random negatives drawn only from premises used in training pairs")
     parser.add_argument("--dim", type=int, default=64)
     parser.add_argument("--layers", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.1)
@@ -117,7 +119,7 @@ def main() -> None:
         args.early_stopping_metric = "val_mrr" if retrieval else "val_loss"
     if args.early_stopping_metric in ("val_mrr", "val_r10") and not retrieval:
         parser.error(f"--early-stopping-metric {args.early_stopping_metric} needs --benchmark and --split")
-    if args.in_file_negatives < 0 or args.random_negatives < 0:
+    if min(args.in_file_negatives, args.random_negatives, args.seen_negatives) < 0:
         parser.error("negative counts must be nonnegative")
     if args.epochs < 1 or args.batch_size < 2 or args.patience < 0:
         parser.error("--epochs must be positive, --batch-size at least 2, and --patience nonnegative")
@@ -149,10 +151,11 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
     sampler = None
-    if args.in_file_negatives or args.random_negatives:
+    if args.in_file_negatives or args.random_negatives or args.seen_negatives:
         import json
         paths = json.loads((args.cache / "premises_meta.json").read_text(encoding="utf-8"))["paths"]
-        sampler = NegativeSampler(paths, args.in_file_negatives, args.random_negatives)
+        sampler = NegativeSampler(paths, args.in_file_negatives, args.random_negatives, args.seen_negatives,
+                                  np.unique(train_pairs.premise_idx))
 
     task = None
     if retrieval:
@@ -163,8 +166,10 @@ def main() -> None:
     print(f"device: {device}; vocabulary: {len(vocab)}")
     if task is not None:
         print(f"retrieval eval: {len(task.ranked_states)} fixed {args.val_part} states, all accessible premises")
+    extra = args.in_file_negatives + args.random_negatives + args.seen_negatives
     print(f"extra negatives per pair: {args.in_file_negatives} same-file + {args.random_negatives} random "
-          f"(premise columns per batch: {args.batch_size * (1 + args.in_file_negatives + args.random_negatives)})")
+          f"+ {args.seen_negatives} seen "
+          f"(premise columns per batch: {args.batch_size * (1 + extra)})")
     print(f"train: {len(train_pairs)} pairs, {len(train_pairs.states)} states; "
           f"validation: {len(val_pairs)} pairs, {len(val_pairs.states)} states")
 
@@ -211,7 +216,8 @@ def main() -> None:
             "val_top1": val_accuracy,
             "seed": args.seed,
             "cache": str(args.cache),
-            "negatives": {"in_file": args.in_file_negatives, "random": args.random_negatives},
+            "negatives": {"in_file": args.in_file_negatives, "random": args.random_negatives,
+                          "seen": args.seen_negatives},
             "retrieval": retrieval_metrics,
         }
         loss_improved = val_loss < best_val_loss

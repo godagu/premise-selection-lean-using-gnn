@@ -69,13 +69,23 @@ def make_batch(pairs: PairSet, idx: np.ndarray):
 class NegativeSampler:
     """
     Extra negative premises for every pair, as in ReProver: `in_file` from the same file as the pair's positive
-    premise (similar statements, hard to tell apart) and `random` from the whole corpus.
+    premise (similar statements, hard to tell apart), `random` from the whole corpus, and `seen` drawn only from
+    `seen_pool` (the premises used in training pairs).
     Premises are stored file by file, so "same file" is a contiguous index range.
     A sampled premise can be a true positive of some state in the batch; the ignore mask removes those.
+
+    Why `seen`: premises that are never anyone's positive (including all val/test-only ones) appear in training
+    only as negatives, so whole-corpus random negatives can teach "looks like a never-used premise -> score low",
+    which hurts exactly the unseen premises at evaluation. Seen-pool negatives are hard in a different way and carry
+    no such shortcut. Whole-corpus negatives remain useful: they push down the many never-used candidates.
     """
 
-    def __init__(self, paths: list[str], in_file: int = 1, random: int = 2):
-        self.in_file, self.random, self.num_premises = in_file, random, len(paths)
+    def __init__(self, paths: list[str], in_file: int = 1, random: int = 2, seen: int = 0,
+                 seen_pool: np.ndarray | None = None):
+        if seen and seen_pool is None:
+            raise ValueError("seen negatives need seen_pool")
+        self.in_file, self.random, self.seen, self.num_premises = in_file, random, seen, len(paths)
+        self.seen_pool = None if seen_pool is None else np.asarray(seen_pool, dtype=np.int64)
         path = np.asarray(paths, dtype=object)
         boundary = np.r_[True, path[1:] != path[:-1]]
         file_id = np.cumsum(boundary) - 1
@@ -85,7 +95,7 @@ class NegativeSampler:
 
     @property
     def per_pair(self) -> int:
-        return self.in_file + self.random
+        return self.in_file + self.random + self.seen
 
     def sample(self, premise_ids: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         parts = []
@@ -94,6 +104,8 @@ class NegativeSampler:
             parts.append(rng.integers(a[:, None], b[:, None], size=(len(premise_ids), self.in_file)).ravel())
         if self.random:
             parts.append(rng.integers(0, self.num_premises, size=len(premise_ids) * self.random))
+        if self.seen:
+            parts.append(self.seen_pool[rng.integers(0, len(self.seen_pool), size=len(premise_ids) * self.seen)])
         return np.concatenate(parts) if parts else np.zeros(0, dtype=np.int64)
 
 
