@@ -15,6 +15,7 @@ class EncoderConfig:
     layers: int = 4 # message passing rounds
     out_dim: int = 126 # size of the output vector for each node
     dropout: float = 0.1 # dropout probability
+    skip_readout: bool = False # readout also sees the node vectors BEFORE message passing (pure symbol identity)
 
 
 # node embedding: every id is a row number in the learnded table. the node's starting vector is the sum of its rows
@@ -81,12 +82,25 @@ def mean_per_graph(h: torch.Tensor, graph_id: torch.Tensor, keep: torch.Tensor, 
     return total / count.clamp(min=1).unsqueeze(1)
 
 class Readout(nn.Module):
-    def __init__(self, dim: int, out_dim: int):
-        super().__init__()
-        self.project = nn.Linear(dim * 3, out_dim) # glue root, goal, context together and project
+    """
+    Default: [mean root | mean goal | mean context] of the final node vectors -> linear.
+    skip=True ("skip readout", cf. jumping-knowledge networks): the same three means are ALSO taken over the node
+    vectors before message passing (h0 = embeddings: what each symbol is, not yet blended with its neighbours),
+    and all six are concatenated. Message passing helps on premises seen in training but blurs exact symbol
+    identity, which matters for unseen premises (the --layers 0 ablation is better there); this keeps both views
+    and lets training weight them. h0 gets its own LayerNorm so both halves have a comparable scale.
+    """
 
-    def forward(self, h: torch.Tensor, batch: GraphBatch) -> torch.Tensor:
-        parts = [mean_per_graph(h, batch.graph_id, batch.group == g, batch.num_graphs) for g in (0, 1, 2)]
+    def __init__(self, dim: int, out_dim: int, skip: bool = False):
+        super().__init__()
+        self.skip = skip
+        if skip:
+            self.skip_norm = nn.LayerNorm(dim)
+        self.project = nn.Linear(dim * (6 if skip else 3), out_dim) # glue root, goal, context together and project
+
+    def forward(self, h: torch.Tensor, batch: GraphBatch, h0: torch.Tensor | None = None) -> torch.Tensor:
+        views = [h, self.skip_norm(h0)] if self.skip else [h]
+        parts = [mean_per_graph(v, batch.graph_id, batch.group == g, batch.num_graphs) for v in views for g in (0, 1, 2)]
         return self.project(torch.cat(parts, dim=1))
     
 
@@ -97,11 +111,11 @@ class GraphEncoder(nn.Module):
         self.cfg = cfg
         self.embed = NodeEmbedding(cfg.vocab_size, cfg.dim)
         self.layers = nn.ModuleList(RGCNLayer(cfg.dim, NUM_EDGE_TYPES, cfg.dropout) for _ in range(cfg.layers))
-        self.readout = Readout(cfg.dim, cfg.out_dim)
+        self.readout = Readout(cfg.dim, cfg.out_dim, skip=cfg.skip_readout)
 
 
     def forward(self, batch: GraphBatch) -> torch.Tensor:
-        h = self.embed(batch)  # [N, d] node vectors
+        h0 = h = self.embed(batch)  # [N, d] node vectors (h0 kept for the skip readout)
         for layer in self.layers:
             h = layer(h, batch.edge_index, batch.edge_type)
-        return self.readout(h, batch)  # [B, out_dim] one vector per graph
+        return self.readout(h, batch, h0)  # [B, out_dim] one vector per graph

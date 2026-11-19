@@ -18,9 +18,19 @@ later checkpoint with worse val loss had 10.9%.
 
 Checkpoints: <output> (best val loss), <output>_best_top1, and with retrieval
 <output>_best_mrr. Early stopping defaults to val_mrr when retrieval is on.
+
+Reproducibility: every checkpoint stores all command-line options ("args") and the git
+commit of the code ("git_commit", with "+dirty" if there were uncommitted changes); both
+are also printed at the top of the log.
+
+Learning rate: --lr-schedule constant (default, as in runs v2-v5) or cosine (decays from
+--learning-rate to 0 over --epochs, stepped every batch; optional linear --warmup-steps).
+The cosine length is always --epochs, even if early stopping ends the run sooner.
 """
 import argparse
+import math
 import random
+import subprocess
 import sys
 from pathlib import Path
 
@@ -34,7 +44,30 @@ from gnn.encoder import EncoderConfig
 from gnn.twin_tower import TwinTower, info_nce
 
 
-def run_epoch(model, pairs, batch_size, device, seed, epoch, optimizer=None, sampler=None):
+def git_commit() -> str:
+    """Short commit hash of the code being run, '+dirty' if files differ from it; 'unknown' outside git."""
+    root = Path(__file__).resolve().parents[1]
+    try:
+        commit = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True, check=True).stdout.strip()
+        return commit + ("+dirty" if dirty else "")
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def lr_factor(step: int, total_steps: int, schedule: str, warmup_steps: int) -> float:
+    """Multiplier of the base learning rate at a given optimizer step."""
+    if warmup_steps and step < warmup_steps:
+        return (step + 1) / warmup_steps
+    if schedule == "constant":
+        return 1.0
+    progress = min((step - warmup_steps) / max(total_steps - warmup_steps, 1), 1.0)
+    return 0.5 * (1 + math.cos(math.pi * progress))                     # cosine: 1 -> 0
+
+
+def run_epoch(model, pairs, batch_size, device, seed, epoch, optimizer=None, sampler=None, scheduler=None):
     import torch
 
     training = optimizer is not None
@@ -61,6 +94,8 @@ def run_epoch(model, pairs, batch_size, device, seed, epoch, optimizer=None, sam
             loss, accuracy = info_nce(model(states, premises), state_ids, premise_ids, ignore)
             loss.backward()
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
         else:
             with torch.no_grad():
                 loss, accuracy = info_nce(model(states, premises), state_ids, premise_ids, ignore)
@@ -90,6 +125,9 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--lr-schedule", choices=("constant", "cosine"), default="constant",
+                        help="constant learning rate, or cosine decay to 0 over --epochs")
+    parser.add_argument("--warmup-steps", type=int, default=0, help="linear learning-rate warmup (optimizer steps)")
     parser.add_argument("--patience", type=int, default=5, help="stop after this many unimproved epochs; 0 disables")
     parser.add_argument(
         "--early-stopping-metric", choices=("val_loss", "val_top1", "val_mrr", "val_r10"), default=None,
@@ -107,6 +145,8 @@ def main() -> None:
     parser.add_argument("--dim", type=int, default=64)
     parser.add_argument("--layers", type=int, default=3, help="message-passing rounds; 0 = ablation without graph structure")
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--skip-readout", action="store_true",
+                        help="readout also averages the node vectors before message passing (symbol identity)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or another torch device")
     parser.add_argument("--output", type=Path, default=Path("runs/twin_tower.pt"))
@@ -145,10 +185,18 @@ def main() -> None:
         raise ValueError("training and validation parts must both contain at least one pair")
 
     config = EncoderConfig(
-        vocab_size=len(vocab), dim=args.dim, layers=args.layers, out_dim=args.dim, dropout=args.dropout
+        vocab_size=len(vocab), dim=args.dim, layers=args.layers, out_dim=args.dim, dropout=args.dropout,
+        skip_readout=args.skip_readout,
     )
     model = TwinTower(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    total_steps = args.epochs * (len(train_pairs) // args.batch_size)    # batch_indices drops the last partial batch
+    scheduler = None
+    if args.lr_schedule != "constant" or args.warmup_steps:
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lambda step: lr_factor(step, total_steps, args.lr_schedule, args.warmup_steps))
+    run_args = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
+    commit = git_commit()
 
     sampler = None
     if args.in_file_negatives or args.random_negatives or args.seen_negatives:
@@ -163,7 +211,10 @@ def main() -> None:
         task = RetrievalTask(args.cache, args.benchmark, args.split, args.val_part, args.train_part,
                              args.retrieval_states, seed=0, premises=train_pairs.premises)
 
-    print(f"device: {device}; vocabulary: {len(vocab)}")
+    print(f"git commit: {commit}")
+    print("args: " + " ".join(f"{k}={v}" for k, v in run_args.items()))
+    print(f"device: {device}; vocabulary: {len(vocab)}; parameters: {sum(p.numel() for p in model.parameters()):,}; "
+          f"lr schedule: {args.lr_schedule} (warmup {args.warmup_steps}, {total_steps} steps)")
     if task is not None:
         print(f"retrieval eval: {len(task.ranked_states)} fixed {args.val_part} states, all accessible premises")
     extra = args.in_file_negatives + args.random_negatives + args.seen_negatives
@@ -185,7 +236,7 @@ def main() -> None:
     stale_epochs = 0
     for epoch in range(args.epochs):
         train_loss, train_accuracy, train_count = run_epoch(
-            model, train_pairs, args.batch_size, device, args.seed, epoch, optimizer, sampler
+            model, train_pairs, args.batch_size, device, args.seed, epoch, optimizer, sampler, scheduler
         )
         val_loss, val_accuracy, val_count = run_epoch(
             model, val_pairs, args.batch_size, device, args.seed, epoch
@@ -194,7 +245,8 @@ def main() -> None:
             f"epoch {epoch + 1:02d}/{args.epochs}: "
             f"train loss {train_loss:.4f}, top-1 {train_accuracy:.3f} ({train_count} pairs); "
             f"val loss {val_loss:.4f}, top-1 {val_accuracy:.3f} ({val_count} pairs); "
-            f"temperature {1 / model.logit_scale.exp().clamp(max=100.0).item():.4f}"
+            f"temperature {1 / model.logit_scale.exp().clamp(max=100.0).item():.4f}; "
+            f"lr {optimizer.param_groups[0]['lr']:.2e}"
         )
         retrieval_metrics = {}
         if task is not None:
@@ -219,6 +271,8 @@ def main() -> None:
             "negatives": {"in_file": args.in_file_negatives, "random": args.random_negatives,
                           "seen": args.seen_negatives},
             "retrieval": retrieval_metrics,
+            "args": run_args,
+            "git_commit": commit,
         }
         loss_improved = val_loss < best_val_loss
         top1_improved = val_accuracy > best_val_top1 or (
