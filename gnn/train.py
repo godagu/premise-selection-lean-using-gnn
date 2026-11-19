@@ -105,7 +105,7 @@ def main() -> None:
     parser.add_argument("--seen-negatives", type=int, default=0,
                         help="per pair: extra random negatives drawn only from premises used in training pairs")
     parser.add_argument("--dim", type=int, default=64)
-    parser.add_argument("--layers", type=int, default=3)
+    parser.add_argument("--layers", type=int, default=3, help="message-passing rounds; 0 = ablation without graph structure")
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or another torch device")
@@ -123,7 +123,7 @@ def main() -> None:
         parser.error("negative counts must be nonnegative")
     if args.epochs < 1 or args.batch_size < 2 or args.patience < 0:
         parser.error("--epochs must be positive, --batch-size at least 2, and --patience nonnegative")
-    if (args.learning_rate <= 0 or args.weight_decay < 0 or args.dim < 1 or args.layers < 1
+    if (args.learning_rate <= 0 or args.weight_decay < 0 or args.dim < 1 or args.layers < 0
             or not 0 <= args.dropout <= 1):
         parser.error("learning rate and model dimensions must be positive; weight decay nonnegative and dropout in [0, 1]")
 
