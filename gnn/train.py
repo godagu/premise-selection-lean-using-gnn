@@ -32,6 +32,7 @@ import math
 import random
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -261,18 +262,24 @@ def main() -> None:
     best_stopping_metric = float("inf") if args.early_stopping_metric == "val_loss" else float("-inf")
     stale_epochs = 0
     for epoch in range(args.epochs):
+        epoch_started = time.time()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
         train_loss, train_accuracy, train_count = run_epoch(
             model, train_pairs, args.batch_size, device, args.seed, epoch, optimizer, sampler, scheduler
         )
+        train_seconds = time.time() - epoch_started
         val_loss, val_accuracy, val_count = run_epoch(
             model, val_pairs, args.batch_size, device, args.seed, epoch
         )
+        peak_gb = torch.cuda.max_memory_allocated(device) / 1e9 if device.type == "cuda" else float("nan")
         print(
             f"epoch {epoch + 1:02d}/{args.epochs}: "
             f"train loss {train_loss:.4f}, top-1 {train_accuracy:.3f} ({train_count} pairs); "
             f"val loss {val_loss:.4f}, top-1 {val_accuracy:.3f} ({val_count} pairs); "
             f"temperature {1 / model.logit_scale.exp().clamp(max=100.0).item():.4f}; "
-            f"lr {optimizer.param_groups[0]['lr']:.2e}"
+            f"lr {optimizer.param_groups[0]['lr']:.2e}; "
+            f"train time {train_seconds / 60:.1f} min, peak GPU memory {peak_gb:.2f} GB"
         )
         retrieval_metrics = {}
         if task is not None:
@@ -298,6 +305,7 @@ def main() -> None:
             "negatives": {"in_file": args.in_file_negatives, "random": args.random_negatives,
                           "seen": args.seen_negatives},
             "retrieval": retrieval_metrics,
+            "train_seconds": train_seconds,
             "args": run_args,
             "git_commit": commit,
         }
