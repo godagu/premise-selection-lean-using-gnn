@@ -20,6 +20,18 @@ Protocol (identical for every method)
 The pairs are rebuilt from the split's json in exactly the order gnn.build_cache used; if they do not line up with
 the cache, the script stops instead of reporting wrong numbers.
 
+LeanDojo-style metrics (--metrics leandojo or both), copied from ReProver's retrieval/evaluate.py so numbers can be
+put next to the LeanDojo / ReProver / Petrovcic et al. tables:
+  * one example per proof STEP (tactic) with at least one gold premise; identical states in different steps count
+    separately; the step's gold premises are a set
+  * unfiltered: all gold premises of the step are among the candidates and compete with each other
+  * R@k = |gold in top k| / |gold|, averaged over steps;  MRR = 1 / rank of the FIRST gold premise, 0 if it is below
+    --mrr-cutoff (ReProver stores only the top 100 retrieved premises)
+  * a gold premise that is not accessible cannot be retrieved (it stays in the denominator), as in ReProver
+Remaining differences to ReProver: gold premises we could not match to a cache premise are dropped (ReProver drops
+unlocatable ones too, but locates by position, so e.g. structure fields map to the enclosing structure there);
+"earlier in the same file" uses the premise order of the cache instead of source positions.
+
 BM25 baseline
   A premise is a "document" made of the token ids already stored in the cache (node tokens + text-bag tokens),
   a state is a query made of its distinct tokens. --bm25-tokens sym (default) keeps only sym:<name> tokens, i.e. the
@@ -63,12 +75,14 @@ def reconstruct_pairs(theorems, names: list[str], paths: list[str]) -> dict:
         by_name.setdefault(name, i)
 
     state_index: dict[str, int] = {}
-    out = {"state_idx": [], "premise_idx": [], "file": [], "thm": []}
+    out = {"state_idx": [], "premise_idx": [], "file": [], "thm": [], "step": []}
+    step_id = -1
     for thm in theorems:
         for step in thm.get("traced_tactics", []):
             annotated = step.get("annotated_tactic")
             if not annotated or len(annotated) < 2 or not step.get("state_before"):
                 continue
+            step_id += 1
             for prov in annotated[1]:
                 premise = by_key.get((prov.get("def_path"), prov.get("full_name")), by_name.get(prov.get("full_name")))
                 if premise is None:
@@ -79,6 +93,8 @@ def reconstruct_pairs(theorems, names: list[str], paths: list[str]) -> dict:
                 out["premise_idx"].append(premise)
                 out["file"].append(thm["file_path"])
                 out["thm"].append(thm["full_name"])
+                out["step"].append(step_id)
+    out["step"] = np.asarray(out["step"], dtype=np.int64)
     out["state_idx"] = np.asarray(out["state_idx"], dtype=np.int64)
     out["premise_idx"] = np.asarray(out["premise_idx"], dtype=np.int64)
     return out
@@ -129,9 +145,11 @@ class RetrievalTask:
 
         self.positives: dict[int, set] = {}
         self.by_state: dict[int, list[int]] = {}
+        self.steps_of_state: dict[int, dict[int, list[int]]] = {}         # state -> step -> its pair indices
         for k, (s, p) in enumerate(zip(self.pairs["state_idx"].tolist(), self.pairs["premise_idx"].tolist())):
             self.positives.setdefault(s, set()).add(p)
             self.by_state.setdefault(s, []).append(k)
+            self.steps_of_state.setdefault(s, {}).setdefault(int(self.pairs["step"][k]), []).append(k)
         states = sorted(self.by_state)
         if max_states is not None and max_states < len(states):     # fixed subset: same seed -> same states
             states = sorted(np.random.default_rng(seed).choice(states, size=max_states, replace=False).tolist())
@@ -147,6 +165,45 @@ class RetrievalTask:
             self._base_masks[file] = mask
         return self._base_masks[file]
 
+    def accessible(self, file: str, thm: str) -> np.ndarray:
+        """Premises a proof in `file` of theorem `thm` may use: imported files + earlier premises of the same file."""
+        mask = self._base(file).copy()
+        if file in self.slices:
+            a, b = self.slices[file]
+            before = self.by_key.get((file, thm))
+            mask[a:(before if before is not None and a <= before < b else b)] = True
+        return mask
+
+    def rank_leandojo(self, score_fn: Callable[[int], np.ndarray], cutoff: int = 100, verbose: bool = True) -> dict:
+        """ReProver-style per-step metrics (see the module docstring)."""
+        r1, r10, mrr, gold_sizes, inaccessible = [], [], [], [], 0
+        started = time.time()
+        for n, s in enumerate(self.ranked_states):
+            scores = score_fn(s)
+            for step, ks in self.steps_of_state[s].items():
+                gold = sorted({int(self.pairs["premise_idx"][k]) for k in ks})
+                mask = self.accessible(self.pairs["file"][ks[0]], self.pairs["thm"][ks[0]])
+                candidates = scores[mask]
+                ranks = []
+                for g in gold:
+                    if not mask[g]:
+                        inaccessible += 1
+                        ranks.append(np.inf)                                  # can never be retrieved
+                        continue
+                    greater = int((candidates > scores[g]).sum())
+                    ties = int((candidates == scores[g]).sum()) - 1
+                    ranks.append(1 + greater + ties / 2)
+                ranks = np.asarray(ranks)
+                r1.append(float((ranks <= 1).sum()) / len(gold))
+                r10.append(float((ranks <= 10).sum()) / len(gold))
+                first = ranks.min()
+                mrr.append(1.0 / first if first <= cutoff else 0.0)
+                gold_sizes.append(len(gold))
+            if verbose and (n + 1) % 1000 == 0:
+                print(f"  ranked {n + 1}/{len(self.ranked_states)} states ({time.time() - started:.0f}s)", flush=True)
+        return {"steps": len(r1), "r1": float(np.mean(r1)), "r10": float(np.mean(r10)), "mrr": float(np.mean(mrr)),
+                "mean_gold": float(np.mean(gold_sizes)), "inaccessible_gold": inaccessible, "cutoff": cutoff}
+
     def rank(self, score_fn: Callable[[int], np.ndarray], verbose: bool = True):
         """-> ranks, candidate counts, seen flag; one entry per pair of the ranked states."""
         ranks, counts, seen_flags = [], [], []
@@ -155,11 +212,7 @@ class RetrievalTask:
             scores = score_fn(s)                                             # [M] score of this state with every premise
             for k in self.by_state[s]:
                 target, file, thm = int(self.pairs["premise_idx"][k]), self.pairs["file"][k], self.pairs["thm"][k]
-                mask = self._base(file).copy()
-                if file in self.slices:
-                    a, b = self.slices[file]
-                    before = self.by_key.get((file, thm))
-                    mask[a:(before if before is not None and a <= before < b else b)] = True   # earlier premises of this file
+                mask = self.accessible(file, thm)
                 for other in self.positives[s]:
                     mask[other] = False                                      # filtered: other correct premises are not competitors
                 mask[target] = True
@@ -292,6 +345,9 @@ def main() -> None:
     ap.add_argument("--encode-batch-size", type=int, default=256)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--metrics", choices=["pairs", "leandojo", "both"], default="both",
+                    help="pairs: our per-pair filtered protocol; leandojo: ReProver's per-step R@1/R@10/MRR")
+    ap.add_argument("--mrr-cutoff", type=int, default=100, help="LeanDojo MRR counts 0 below this rank (ReProver: 100)")
     args = ap.parse_args()
     if args.method == "model" and args.checkpoint is None:
         ap.error("--method model needs --checkpoint")
@@ -326,10 +382,16 @@ def main() -> None:
         score_fn = model_score_fn(model, task, device, args.encode_batch_size)
         print(f"encoding time (all premises + states): {time.time() - started:.1f}s")
 
-    ranks, counts, is_seen = task.rank(score_fn)
-    report("all pairs", ranks, counts)
-    report("premise seen in training", ranks[is_seen], counts[is_seen])
-    report("premise NOT seen in training", ranks[~is_seen], counts[~is_seen])
+    if args.metrics in ("pairs", "both"):
+        ranks, counts, is_seen = task.rank(score_fn)
+        report("all pairs", ranks, counts)
+        report("premise seen in training", ranks[is_seen], counts[is_seen])
+        report("premise NOT seen in training", ranks[~is_seen], counts[~is_seen])
+    if args.metrics in ("leandojo", "both"):
+        m = task.rank_leandojo(score_fn, args.mrr_cutoff)
+        print(f"\n== LeanDojo-style, per proof step (n={m['steps']} steps, {m['mean_gold']:.2f} gold premises per step) ==")
+        print(f"  R@1 {100 * m['r1']:.2f}%   R@10 {100 * m['r10']:.2f}%   MRR {m['mrr']:.3f}   "
+              f"(MRR 0 below rank {m['cutoff']}; {m['inaccessible_gold']} gold premises not accessible)")
 
 
 if __name__ == "__main__":

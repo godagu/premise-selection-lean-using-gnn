@@ -290,7 +290,7 @@ def main() -> None:
             print(f"          retrieval ({len(ranks)} pairs): R@1 {retrieval_metrics['r1']:.3f}  "
                   f"R@10 {retrieval_metrics['r10']:.3f}  R@100 {retrieval_metrics['r100']:.3f}  "
                   f"MRR {retrieval_metrics['mrr']:.4f}  median rank {retrieval_metrics['median_rank']:.0f}  "
-                  f"| novel premises R@10 {novel.get('r10', float('nan')):.3f}  MRR {novel.get('mrr', float('nan')):.4f}",
+                  f"| unseen premises R@10 {novel.get('r10', float('nan')):.3f}  MRR {novel.get('mrr', float('nan')):.4f}",
                   flush=True)
 
         checkpoint = {
