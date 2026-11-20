@@ -22,7 +22,7 @@ python -m gnn.train --cache cache/novel_premises_full --epochs 25 --patience 5 \
 | v2 `full_v2` | bba5505 | none | baseline: in-batch negatives only | 14 (stopped at 19) | 0.076 |
 | v3 `full_v3` | c517d63 | `--in-file-negatives 1 --random-negatives 2` | hard negatives (ReProver-style) | 24 | 0.094 |
 | v4 `full_v4` | 6f29ce2 | `--in-file-negatives 1 --random-negatives 1 --seen-negatives 1` | one random negative from training premises instead | 25 (still improving) | 0.104 |
-| v5 `full_v5_l0` | 454f42e | v4 flags + `--layers 0` | ablation: no message passing (does structure help?) | running | ~0.069 (ep15) |
+| v5 `full_v5_l0` | 454f42e | v4 flags + `--layers 0` | ablation: no message passing (does structure help?) | 21 (ran all 25) | 0.076 |
 | v6 `full_v6_d128` | *(next push)* | v4 flags + `--dim 128` | bigger model | planned | |
 | v7 `full_v7_cos40` | *(next push)* | v4 flags + `--epochs 40 --lr-schedule cosine` | longer training with lr decay | planned | |
 
@@ -51,7 +51,13 @@ final numbers come from the test set, evaluated once at the end.
 ## Findings so far
 - Hard negatives: MRR 0.071 -> 0.094, median rank 428 -> 153 (v2 -> v4). Cost: worse on unseen premises (0.141 -> 0.121).
 - The seen negative (v4) beats a second random one (v3) in 24 of 25 epochs, about +7% MRR over the last 10 epochs.
-- Structure (v4 vs v5, at epoch 15 on 1,000 states): MRR 0.092 vs 0.069. The no-structure model is better on unseen
-  premises only in epochs 1-6; from epoch 7 on, v4 is better there too.
+- Structure (v4 vs v5, best epochs on 1,000 states): MRR 0.104 vs 0.076 (+35%), R@1 5.8% vs 3.5%, median rank 150 vs 254.
+  The no-structure model is better on unseen premises only in epochs 1-6; averaged over the last 10 epochs v4 is
+  better there too (0.120 vs 0.107).
+- Structure alone (v2: message passing, easy negatives) and hard negatives alone (v5: no message passing) reach the
+  same MRR (0.076); only the combination (v4) goes beyond it.
+- Skip readout (`--skip-readout`), small cache (3,000 theorems), v4 negatives, 8 epochs, 2 seeds: MRR +15% with seed 42,
+  -6% with seed 7; seed-to-seed spread of the plain v4 settings alone is about 20%. No evidence it helps; not run on
+  full data.
 - v4 beats BM25 overall (MRR +20%, median rank 153 vs 485) and on seen premises (MRR 2.4x), but BM25 stays clearly
   better on unseen premises (0.193 vs 0.121).

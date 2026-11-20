@@ -41,6 +41,7 @@ if __package__ in (None, ""):
 
 from gnn.dataset import NegativeSampler, batch_indices, load_part, load_vocab, make_training_batch
 from gnn.encoder import EncoderConfig
+from gnn.text_encoder import TextEncoderConfig
 from gnn.twin_tower import TwinTower, info_nce
 
 
@@ -142,8 +143,17 @@ def main() -> None:
                         help="per pair: extra random negatives (ReProver uses 2)")
     parser.add_argument("--seen-negatives", type=int, default=0,
                         help="per pair: extra random negatives drawn only from premises used in training pairs")
-    parser.add_argument("--dim", type=int, default=64)
-    parser.add_argument("--layers", type=int, default=3, help="message-passing rounds; 0 = ablation without graph structure")
+    parser.add_argument("--encoder", choices=("graph", "text"), default="graph",
+                        help="graph: R-GCN over the graph cache; text: byte-level Transformer over <cache>/text "
+                             "(build it with gnn.build_text_cache)")
+    parser.add_argument("--dim", type=int, default=None, help="node / byte vector size (default 64 graph, 128 text)")
+    parser.add_argument("--layers", type=int, default=None,
+                        help="message-passing rounds (default 3; 0 = no graph structure) or Transformer layers "
+                             "(default 6)")
+    parser.add_argument("--heads", type=int, default=4, help="text encoder: attention heads")
+    parser.add_argument("--ff-dim", type=int, default=None, help="text encoder: feed-forward size (default 4 x dim)")
+    parser.add_argument("--max-state-bytes", type=int, default=1024, help="text encoder: truncate states")
+    parser.add_argument("--max-premise-bytes", type=int, default=512, help="text encoder: truncate premises")
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--skip-readout", action="store_true",
                         help="readout also averages the node vectors before message passing (symbol identity)")
@@ -152,6 +162,14 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("runs/twin_tower.pt"))
     args = parser.parse_args()
 
+    if args.dim is None:
+        args.dim = 128 if args.encoder == "text" else 64
+    if args.layers is None:
+        args.layers = 6 if args.encoder == "text" else 3
+    if args.ff_dim is None:
+        args.ff_dim = 4 * args.dim
+    if args.encoder == "text" and (args.skip_readout or args.layers < 1 or args.dim % args.heads):
+        parser.error("text encoder: no --skip-readout, at least 1 layer, and --dim divisible by --heads")
     retrieval = args.benchmark is not None
     if retrieval and args.split is None:
         parser.error("--benchmark needs --split")
@@ -179,15 +197,23 @@ def main() -> None:
         else args.device
     )
     vocab = load_vocab(args.cache)
-    train_pairs = load_part(args.cache, args.train_part)
-    val_pairs = load_part(args.cache, args.val_part, premises=train_pairs.premises)
+    if args.encoder == "text":
+        config = TextEncoderConfig(
+            dim=args.dim, layers=args.layers, heads=args.heads, ff_dim=args.ff_dim, out_dim=args.dim,
+            dropout=args.dropout, max_len=max(args.max_state_bytes, args.max_premise_bytes),
+            max_state_bytes=args.max_state_bytes, max_premise_bytes=args.max_premise_bytes,
+        )
+    else:
+        config = EncoderConfig(
+            vocab_size=len(vocab), dim=args.dim, layers=args.layers, out_dim=args.dim, dropout=args.dropout,
+            skip_readout=args.skip_readout,
+        )
+    text_config = config if args.encoder == "text" else None
+    train_pairs = load_part(args.cache, args.train_part, text_config=text_config)
+    val_pairs = load_part(args.cache, args.val_part, premises=train_pairs.premises, text_config=text_config)
     if len(train_pairs) == 0 or len(val_pairs) == 0:
         raise ValueError("training and validation parts must both contain at least one pair")
 
-    config = EncoderConfig(
-        vocab_size=len(vocab), dim=args.dim, layers=args.layers, out_dim=args.dim, dropout=args.dropout,
-        skip_readout=args.skip_readout,
-    )
     model = TwinTower(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     total_steps = args.epochs * (len(train_pairs) // args.batch_size)    # batch_indices drops the last partial batch
@@ -209,11 +235,11 @@ def main() -> None:
     if retrieval:
         from gnn.evaluate import RetrievalTask
         task = RetrievalTask(args.cache, args.benchmark, args.split, args.val_part, args.train_part,
-                             args.retrieval_states, seed=0, premises=train_pairs.premises)
+                             args.retrieval_states, seed=0, premises=train_pairs.premises, text_config=text_config)
 
     print(f"git commit: {commit}")
     print("args: " + " ".join(f"{k}={v}" for k, v in run_args.items()))
-    print(f"device: {device}; vocabulary: {len(vocab)}; parameters: {sum(p.numel() for p in model.parameters()):,}; "
+    print(f"device: {device}; encoder: {args.encoder}; vocabulary: {len(vocab) if args.encoder == 'graph' else 257}; parameters: {sum(p.numel() for p in model.parameters()):,}; "
           f"lr schedule: {args.lr_schedule} (warmup {args.warmup_steps}, {total_steps} steps)")
     if task is not None:
         print(f"retrieval eval: {len(task.ranked_states)} fixed {args.val_part} states, all accessible premises")
@@ -263,6 +289,7 @@ def main() -> None:
         checkpoint = {
             "model_state_dict": model.state_dict(),
             "config": vars(config),
+            "encoder": args.encoder,
             "epoch": epoch + 1,
             "val_loss": val_loss,
             "val_top1": val_accuracy,

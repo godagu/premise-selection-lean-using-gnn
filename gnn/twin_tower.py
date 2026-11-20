@@ -18,14 +18,30 @@ import torch.nn.functional as F
 
 from gnn.batch import GraphBatch
 from gnn.encoder import EncoderConfig, GraphEncoder
+from gnn.text_encoder import TextEncoder, TextEncoderConfig
+
+
+def make_encoder(cfg):
+    """GraphEncoder for an EncoderConfig, TextEncoder (byte-level Transformer baseline) for a TextEncoderConfig."""
+    return TextEncoder(cfg) if isinstance(cfg, TextEncoderConfig) else GraphEncoder(cfg)
+
+
+def encoder_kind(cfg) -> str:
+    return "text" if isinstance(cfg, TextEncoderConfig) else "graph"
+
+
+def config_from_checkpoint(checkpoint: dict):
+    """Rebuild the encoder config saved by gnn.train (checkpoints without "encoder" are graph models)."""
+    cls = TextEncoderConfig if checkpoint.get("encoder", "graph") == "text" else EncoderConfig
+    return cls(**checkpoint["config"])
 
 
 class TwinTower(nn.Module):
-    def __init__(self, cfg: EncoderConfig, share_encoder: bool = True, separate_heads: bool = True):
+    def __init__(self, cfg: "EncoderConfig | TextEncoderConfig", share_encoder: bool = True, separate_heads: bool = True):
         super().__init__()
-        self.state_encoder = GraphEncoder(cfg)
+        self.state_encoder = make_encoder(cfg)
         # shared: the very same module (and weights) is used for premises; separate: a second, independent encoder
-        self.premise_encoder = self.state_encoder if share_encoder else GraphEncoder(cfg)
+        self.premise_encoder = self.state_encoder if share_encoder else make_encoder(cfg)
         # a small linear "head" per side lets the two sides specialise even when the encoder is shared
         self.state_head = nn.Linear(cfg.out_dim, cfg.out_dim) if separate_heads else nn.Identity()
         self.premise_head = nn.Linear(cfg.out_dim, cfg.out_dim) if separate_heads else nn.Identity()

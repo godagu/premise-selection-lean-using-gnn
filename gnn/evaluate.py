@@ -92,10 +92,19 @@ class RetrievalTask:
     """
 
     def __init__(self, cache: Path, benchmark: Path, split: str, part: str = "val", train_part: str = "train",
-                 max_states: int | None = None, seed: int = 0, premises: GraphStore | None = None):
+                 max_states: int | None = None, seed: int = 0, premises=None, text_config=None):
+        """text_config (a TextEncoderConfig): rank with the aligned text stores instead of the graph stores."""
         cache, benchmark = Path(cache), Path(benchmark)
-        self.premises = premises if premises is not None else GraphStore.load(cache / "premises")
-        self.states = GraphStore.load(cache / f"{part}_states")
+        self.state_collate = self.premise_collate = None                    # None = graphs
+        if text_config is not None:
+            from gnn.dataset import text_collates
+            from gnn.text_store import TextStore
+            self.premises = premises if premises is not None else TextStore.load(cache / "text" / "premises")
+            self.states = TextStore.load(cache / "text" / f"{part}_states")
+            self.state_collate, self.premise_collate = text_collates(text_config)
+        else:
+            self.premises = premises if premises is not None else GraphStore.load(cache / "premises")
+            self.states = GraphStore.load(cache / f"{part}_states")
         self.paths = json.loads((cache / "premises_meta.json").read_text(encoding="utf-8"))["paths"]
         info = json.loads((cache / "info.json").read_text(encoding="utf-8")) if (cache / "info.json").exists() else {}
         self.seen = set(np.load(cache / f"{train_part}_pairs.npz")["premise_idx"].tolist())
@@ -239,25 +248,32 @@ def bm25_score_fn(task: RetrievalTask, vocab: TokenVocab, tokens: str = "sym") -
 
 
 # ----------------------------------------------------------------------------------- the model (needs PyTorch)
-def encode_store(model_fn, store: GraphStore, device, batch_size: int, label: str, verbose: bool = True) -> np.ndarray:
+def encode_store(model_fn, store, device, batch_size: int, label: str, verbose: bool = True,
+                 collate=None) -> np.ndarray:
+    """Embed every item of a store. collate=None means graphs. Text stores are encoded in length order (much less
+    padding), and the rows are put back in store order."""
     import torch
-    from gnn.batch import collate
+    if collate is None:
+        from gnn.batch import collate
+    order = np.argsort(store.lengths, kind="stable") if hasattr(store, "lengths") else np.arange(len(store))
     chunks, started = [], time.time()
     with torch.no_grad():
         for start in range(0, len(store), batch_size):
-            batch = collate([store.get(i) for i in range(start, min(start + batch_size, len(store)))]).to(device)
+            batch = collate([store.get(int(i)) for i in order[start:start + batch_size]]).to(device)
             chunks.append(model_fn(batch).float().cpu().numpy())
             if verbose and (start // batch_size) % 100 == 0:
                 print(f"  encoding {label}: {start}/{len(store)} ({time.time() - started:.0f}s)", flush=True)
-    return np.concatenate(chunks)
+    out = np.empty((len(store), chunks[0].shape[1]), dtype=np.float32)
+    out[order] = np.concatenate(chunks)
+    return out
 
 
 def model_score_fn(model, task: RetrievalTask, device, batch_size: int = 256, verbose: bool = True):
     """Encode all premises and the ranked states once; returns score_fn for task.rank."""
     was_training = model.training
     model.eval()
-    P = encode_store(model.encode_premises, task.premises, device, batch_size, "premises", verbose)
-    Q = encode_store(model.encode_states, task.states, device, batch_size, "states", verbose)
+    P = encode_store(model.encode_premises, task.premises, device, batch_size, "premises", verbose, task.premise_collate)
+    Q = encode_store(model.encode_states, task.states, device, batch_size, "states", verbose, task.state_collate)
     model.train(was_training)
     return lambda s: P @ Q[s]                                                 # cosine: rows are unit length
 
@@ -280,7 +296,16 @@ def main() -> None:
     if args.method == "model" and args.checkpoint is None:
         ap.error("--method model needs --checkpoint")
 
-    task = RetrievalTask(args.cache, args.benchmark, args.split, args.part, args.train_part, args.max_states, args.seed)
+    checkpoint = None
+    text_config = None
+    if args.method == "model":
+        import torch
+        from gnn.twin_tower import config_from_checkpoint, encoder_kind
+        checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+        config = config_from_checkpoint(checkpoint)
+        text_config = config if encoder_kind(config) == "text" else None
+    task = RetrievalTask(args.cache, args.benchmark, args.split, args.part, args.train_part, args.max_states, args.seed,
+                         text_config=text_config)
     print(f"{len(task.pairs['state_idx'])} pairs, {len(task.states)} states, {len(task.premises)} premises; "
           f"{len(task.seen)} premises appear in the {args.train_part} pairs; ranking {len(task.ranked_states)} states")
 
@@ -288,18 +313,18 @@ def main() -> None:
         print(f"method: BM25 over {args.bm25_tokens} tokens")
         score_fn = bm25_score_fn(task, TokenVocab.load(args.cache / "vocab.json"), args.bm25_tokens)
     else:
-        import torch
-        from gnn.encoder import EncoderConfig
         from gnn.twin_tower import TwinTower
         device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available()
                               else "cpu" if args.device == "auto" else args.device)
-        checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=True)
-        config = EncoderConfig(**checkpoint["config"])
         model = TwinTower(config).to(device)
         model.load_state_dict(checkpoint["model_state_dict"])
-        print(f"checkpoint {args.checkpoint}: epoch {checkpoint.get('epoch')}, val loss {checkpoint.get('val_loss')}, "
-              f"val top-1 {checkpoint.get('val_top1')}   (dim {config.dim}, layers {config.layers}, device {device})")
+        print(f"checkpoint {args.checkpoint}: {encoder_kind(config)} encoder, epoch {checkpoint.get('epoch')}, "
+              f"val loss {checkpoint.get('val_loss')}, val top-1 {checkpoint.get('val_top1')}   "
+              f"(dim {config.dim}, layers {config.layers}, "
+              f"{sum(p.numel() for p in model.parameters()):,} parameters, device {device})")
+        started = time.time()
         score_fn = model_score_fn(model, task, device, args.encode_batch_size)
+        print(f"encoding time (all premises + states): {time.time() - started:.1f}s")
 
     ranks, counts, is_seen = task.rank(score_fn)
     report("all pairs", ranks, counts)

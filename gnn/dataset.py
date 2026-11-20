@@ -8,8 +8,9 @@ Loading a cache built by gnn.build_cache and cutting it into training batches.
 """
 import json
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, partial
 from pathlib import Path
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -23,6 +24,17 @@ class PairSet:
     premises: GraphStore         # every premise graph (shared by all parts)
     state_idx: np.ndarray        # [pairs]  index into `states`
     premise_idx: np.ndarray      # [pairs]  index into `premises`
+    # how a list of store items becomes a model batch; None = graphs (gnn.batch.collate). Text: see load_part
+    state_collate: Optional[Callable] = None
+    premise_collate: Optional[Callable] = None
+
+    def collate_states(self, indices) -> "object":
+        from gnn.batch import collate
+        return (self.state_collate or collate)([self.states.get(int(i)) for i in indices])
+
+    def collate_premises(self, indices) -> "object":
+        from gnn.batch import collate
+        return (self.premise_collate or collate)([self.premises.get(int(j)) for j in indices])
 
     def __len__(self) -> int:
         return len(self.state_idx)
@@ -41,9 +53,25 @@ def load_vocab(cache_dir) -> TokenVocab:
     return TokenVocab.load(Path(cache_dir) / "vocab.json")
 
 
-def load_part(cache_dir, part: str, premises: GraphStore | None = None) -> PairSet:
+def text_collates(text_config) -> tuple[Callable, Callable]:
+    """(state collate, premise collate) for the text encoder: truncate + pad bytes."""
+    from gnn.text_encoder import collate_text
+    return (partial(collate_text, max_bytes=text_config.max_state_bytes),
+            partial(collate_text, max_bytes=text_config.max_premise_bytes))
+
+
+def load_part(cache_dir, part: str, premises=None, text_config=None) -> PairSet:
+    """Graph stores by default; with text_config (a TextEncoderConfig) the aligned text stores from <cache>/text/
+    (built by gnn.build_text_cache). Pairs are the same file either way."""
     cache_dir = Path(cache_dir)
     pairs = np.load(cache_dir / f"{part}_pairs.npz")
+    if text_config is not None:
+        from gnn.text_store import TextStore
+        state_collate, premise_collate = text_collates(text_config)
+        return PairSet(states=TextStore.load(cache_dir / "text" / f"{part}_states"),
+                       premises=premises if premises is not None else TextStore.load(cache_dir / "text" / "premises"),
+                       state_idx=pairs["state_idx"], premise_idx=pairs["premise_idx"],
+                       state_collate=state_collate, premise_collate=premise_collate)
     return PairSet(states=GraphStore.load(cache_dir / f"{part}_states"),
                    premises=premises if premises is not None else GraphStore.load(cache_dir / "premises"),
                    state_idx=pairs["state_idx"], premise_idx=pairs["premise_idx"])
@@ -126,13 +154,11 @@ def make_training_batch(pairs: PairSet, idx: np.ndarray, sampler: "NegativeSampl
     the batch), which also catches a state that uses two premises appearing in two different pairs.
     """
     import torch
-    from gnn.batch import collate
     state_ids, premise_ids = pairs.state_idx[idx], pairs.premise_idx[idx]
     if sampler is not None and sampler.per_pair:
         premise_ids = np.concatenate([premise_ids, sampler.sample(premise_ids, rng)])
     ignore = positive_mask(pairs, state_ids, premise_ids)
-    return (collate([pairs.states.get(int(i)) for i in state_ids]),
-            collate([pairs.premises.get(int(j)) for j in premise_ids]),
+    return (pairs.collate_states(state_ids), pairs.collate_premises(premise_ids),
             torch.from_numpy(state_ids), torch.from_numpy(premise_ids), torch.from_numpy(ignore))
 
 
